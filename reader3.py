@@ -5,6 +5,9 @@ Parses an EPUB file into a structured object that can be used to serve the book 
 import os
 import pickle
 import shutil
+import tarfile
+import zipfile
+import io
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any
 from datetime import datetime
@@ -68,6 +71,31 @@ class Book:
 
 
 # --- Utilities ---
+
+def _convert_tar_to_zip_in_memory(tar_path: str) -> io.BytesIO:
+    """
+    Converts a .tar (or compressed tar) file to a .zip file in memory.
+    Ebooklib requires a ZIP-format EPUB.
+    """
+    zip_buffer = io.BytesIO()
+    
+    with tarfile.open(tar_path, "r:*") as tar:
+        members = tar.getmembers()
+        # Find the root directory by locating the 'mimetype' file
+        mimetype_member = next((m for m in members if os.path.basename(m.name) == 'mimetype'), None)
+        root = os.path.dirname(mimetype_member.name) + '/' if mimetype_member and os.path.dirname(mimetype_member.name) else ""
+
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for member in members:
+                if member.isfile():
+                    f = tar.extractfile(member)
+                    if f:
+                        arcname = member.name[len(root):] if member.name.startswith(root) else member.name
+                        zip_file.writestr(arcname, f.read())
+    
+    zip_buffer.seek(0)
+    return zip_buffer
+
 
 def clean_html_content(soup: BeautifulSoup) -> BeautifulSoup:
 
@@ -176,7 +204,15 @@ def process_epub(epub_path: str, output_dir: str) -> Book:
 
     # 1. Load Book
     print(f"Loading {epub_path}...")
-    book = epub.read_epub(epub_path)
+    
+    # Handle TAR files by converting them to ZIP in memory
+    if tarfile.is_tarfile(epub_path):
+        print(f"Detected TAR format for {epub_path}, converting to ZIP in memory...")
+        epub_resource = _convert_tar_to_zip_in_memory(epub_path)
+    else:
+        epub_resource = epub_path
+
+    book = epub.read_epub(epub_resource)
 
     # 2. Extract Metadata
     metadata = extract_metadata_robust(book)
